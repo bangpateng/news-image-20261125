@@ -315,16 +315,19 @@ const STORIES: Story[] = [
   { kicker: "MIDDLE EAST", headline: "HOUTHIS STRIKE RIYADH'S PIF TOWER", summary: "11 wounded in second hit in under a week.", pic: picTower, accent: RED },
   { kicker: "TECH / COURTS", headline: "HUAWEI GUILTY OF STEALING TRADE SECRETS", summary: "US jury convicts on 10 of 12 counts.", pic: picVerdict, accent: NAVY },
   { kicker: "WAR IN UKRAINE", headline: "UKRAINE HITS RUSSIAN SHIP IN GULF OF FINLAND", summary: "Kyiv says it also sank a warship off Libya.", pic: picShip, accent: TEAL },
-  { kicker: "MARKETS", headline: "NASDAQ SLIDES 1.5% AS NVIDIA TUMBLES 6%", summary: "Chip stocks fall 8% on new tariff threat.", pic: picChart, accent: RED },
+  { kicker: "MARKETS", headline: "NASDAQ -1.5% AS NVIDIA -6%", summary: "Chip stocks fall 8% on new tariff threat.", pic: picChart, accent: RED },
   { kicker: "SPACE", headline: "PAKISTAN'S FIRST ASTRONAUT BLASTS OFF", summary: "Shenzhou-24 lifts off to Tiangong station.", pic: picRocket, accent: NAVY },
   { kicker: "MIDDLE EAST", headline: "ISRAELI STRIKE KILLS HAMAS SECURITY CHIEF", summary: "Naeem Abu Nahel killed in Gaza, officials say.", pic: picTarget, accent: RED },
-  { kicker: "ASIA", headline: "5.6 QUAKE SHAKES NEPAL NEAR TIBET BORDER", summary: "Tremor felt across the Himalayan region.", pic: picMountain, accent: TEAL },
+  { kicker: "ASIA", headline: "QUAKE OF 5.6 SHAKES NEPAL", summary: "Near the Tibet border; tremor felt widely.", pic: picMountain, accent: TEAL },
   { kicker: "HEALTH", headline: "WHO PULLS EBOLA TEAMS FROM DR CONGO FIGHTING", summary: "Outbreak toll reaches 5,775 dead.", pic: picVirus, accent: NAVY },
-  { kicker: "WASHINGTON", headline: "TRUMP HONOURS GIULIANI, PARDONS TURKEYS", summary: "Medal of Freedom; turkey pardon.", pic: picMedal, accent: GOLD },
+  { kicker: "WASHINGTON", headline: "TRUMP HONOURS GIULIANI", summary: "Medal of Freedom; turkey pardon.", pic: picMedal, accent: GOLD },
 ];
 
 // ---------------------------------------------------------------- layout
 function drawMasthead(): void {
+  // Layout guard: masthead lines must fit the canvas width.
+  if (textWidth("THE WORLD IN ONE DAY", 5) > W) throw new Error("masthead title overflows");
+  if (textWidth("WEDNESDAY 25 NOVEMBER 2026", 3) > W) throw new Error("masthead date overflows");
   rect(0, 0, W, 150, NAVY);
   rect(0, 150, W, 6, RED);
   drawTextCentered("THE WORLD IN ONE DAY", 512, 26, 5, WHITE);
@@ -348,8 +351,10 @@ function drawLead(): void {
   const tx = x + 168;
   drawText("LEAD STORY - CYBERATTACK", tx, y + 18, 2, RED);
   const head = wrap("CIA AND ODNI HIT BY CYBERATTACK", 3, 1000 - 168 - 28);
+  if (head.length > 2) throw new Error(`lead headline wraps to ${head.length} lines, panel fits 2`);
   head.forEach((ln, i) => drawText(ln, tx, y + 46 + i * 26, 3, INK));
   const sum = wrap("Unclassified systems breached, CNN reported 25 Nov. US spy agencies probe the intrusion.", 2, 1000 - 168 - 28);
+  if (sum.length > 2) throw new Error(`lead summary wraps to ${sum.length} lines, panel fits 2`);
   sum.forEach((ln, i) => drawText(ln, tx, y + 108 + i * 18, 2, GREY));
 }
 
@@ -363,8 +368,10 @@ function drawPanel(s: Story, x: number, y: number, w: number, h: number): void {
   drawText(s.kicker, x + 14, y + 16, 2, s.accent);
   s.pic(x + 14, y + 44, 64, s.accent === GOLD ? NAVY : s.accent);
   const head = wrap(s.headline, 2, w - 92 - 14);
+  if (head.length > 3) throw new Error(`headline wraps to ${head.length} lines, panel fits 3: ${s.headline}`);
   head.slice(0, 3).forEach((ln, i) => drawText(ln, x + 92, y + 48 + i * 18, 2, INK));
   const sum = wrap(s.summary, 2, w - 28);
+  if (sum.length > 2) throw new Error(`summary wraps to ${sum.length} lines, panel fits 2: ${s.summary}`);
   sum.slice(0, 2).forEach((ln, i) => drawText(ln, x + 14, y + 132 + i * 18, 2, GREY));
 }
 
@@ -438,6 +445,41 @@ function encodePng(): Buffer {
   return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", compressed), chunk("IEND", Buffer.alloc(0))]);
 }
 
+// Re-read the written file and verify it round-trips exactly: PNG signature,
+// IHDR dimensions, every chunk CRC, and byte-equality with the buffer we
+// encoded. Throws on any mismatch so a bad write can never pass silently.
+function validateWrittenPng(expected: Buffer, filePath: string): void {
+  const onDisk = fs.readFileSync(filePath);
+  if (!onDisk.equals(expected)) throw new Error("written PNG bytes differ from encoded buffer");
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (!onDisk.subarray(0, 8).equals(sig)) throw new Error("written file lacks PNG signature");
+  let off = 8;
+  let sawIEND = false;
+  while (off < onDisk.length) {
+    if (off + 12 > onDisk.length) throw new Error("truncated PNG chunk header");
+    const len = onDisk.readUInt32BE(off);
+    const type = onDisk.toString("ascii", off + 4, off + 8);
+    if (off + 12 + len > onDisk.length) throw new Error(`truncated PNG chunk ${type}`);
+    const data = onDisk.subarray(off + 8, off + 8 + len);
+    const storedCrc = onDisk.readUInt32BE(off + 8 + len);
+    const actualCrc = crc32(Buffer.concat([Buffer.from(type, "ascii"), data]));
+    if (storedCrc !== actualCrc) throw new Error(`PNG chunk ${type} CRC mismatch`);
+    if (type === "IHDR") {
+      if (len !== 13) throw new Error("IHDR has wrong length");
+      if (data.readUInt32BE(0) !== W || data.readUInt32BE(4) !== H)
+        throw new Error(`IHDR dimensions ${data.readUInt32BE(0)}x${data.readUInt32BE(4)}, expected ${W}x${H}`);
+    }
+    if (type === "IEND") {
+      sawIEND = true;
+      off += 12 + len;
+      break; // anything after IEND is trailing bytes, caught by the check below
+    }
+    off += 12 + len;
+  }
+  if (!sawIEND) throw new Error("PNG missing IEND chunk");
+  if (off !== onDisk.length) throw new Error("trailing bytes after PNG IEND chunk");
+}
+
 // ---------------------------------------------------------------- main
 function main(): void {
   const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output"; // empty env falls back to /output
@@ -447,6 +489,7 @@ function main(): void {
   if (png.length > 1048576) throw new Error(`PNG too large: ${png.length} bytes`);
   const outPath = path.join(outDir, "entry.png");
   fs.writeFileSync(outPath, png);
+  validateWrittenPng(png, outPath);
   console.log(`Wrote ${outPath} (${png.length} bytes, ${W}x${H})`);
 }
 
